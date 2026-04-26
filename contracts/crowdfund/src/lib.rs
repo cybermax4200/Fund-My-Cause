@@ -72,6 +72,9 @@ impl CrowdfundContract {
         social_links: Option<Vec<String>>,
         platform_config: Option<PlatformConfig>,
         accepted_tokens: Option<Vec<Address>>,
+        category: Category,
+        vesting: Option<VestingSchedule>,
+        penalty_bps: Option<u32>,
     ) -> Result<(), ContractError> {
         if env.storage().instance().has(&KEY_CREATOR) {
             return Err(ContractError::AlreadyInitialized);
@@ -86,6 +89,11 @@ impl CrowdfundContract {
         }
         if min_contribution < 0 {
             return Err(ContractError::BelowMinimum);
+        }
+        if let Some(p) = penalty_bps {
+            if p > 10_000 {
+                return Err(ContractError::InvalidPenalty);
+            }
         }
 
         if let Some(ref config) = platform_config {
@@ -105,6 +113,7 @@ impl CrowdfundContract {
         env.storage().instance().set(&KEY_DESC, &description);
         env.storage().instance().set(&KEY_TOTAL, &0i128);
         env.storage().instance().set(&KEY_STATUS, &Status::Active);
+        env.storage().instance().set(&KEY_CATEGORY, &category);
         env.storage().instance().set(&DataKey::ContributorCount, &0u32);
         env.storage().instance().set(&DataKey::LargestContribution, &0i128);
 
@@ -112,15 +121,28 @@ impl CrowdfundContract {
             env.storage().instance().set(&KEY_SOCIAL, &links);
         }
 
-        env.storage().instance().set(&DataKey::ContributorCount, &0u32);
-        env.storage().instance().set(&DataKey::LargestContribution, &0i128);
-
         if let Some(tokens) = accepted_tokens {
             env.storage().instance().set(&DataKey::AcceptedTokens, &tokens);
         }
 
+        if let Some(v) = vesting {
+            env.storage().instance().set(&KEY_VESTING, &v);
+        }
+
+        if let Some(p) = penalty_bps {
+            env.storage().instance().set(&DataKey::PenaltyBps, &p);
+        }
+
         let empty: Vec<Address> = Vec::new(&env);
         env.storage().persistent().set(&KEY_CONTRIBS, &empty);
+
+        let mut history: Vec<GoalAdjustment> = Vec::new(&env);
+        history.push_back(GoalAdjustment {
+            previous_goal: 0,
+            new_goal: goal,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&KEY_GOAL_HISTORY, &history);
 
         env.events().publish(("campaign", "initialized"), ());
         Ok(())
@@ -287,22 +309,31 @@ impl CrowdfundContract {
         let token_address: Address = env.storage().instance().get(&KEY_TOKEN).unwrap();
         let token_client = token::Client::new(&env, &token_address);
 
-        let payout = if let Some(config) = env.storage().instance().get::<_, PlatformConfig>(&KEY_PLATFORM) {
+        let mut payout = total;
+        if let Some(config) = env.storage().instance().get::<_, PlatformConfig>(&KEY_PLATFORM) {
             let fee = total * config.fee_bps as i128 / 10_000;
             token_client.transfer(&env.current_contract_address(), &config.address, &fee);
-            total - fee
+            payout = total - fee;
+        }
+
+        // Apply vesting if configured
+        if let Some(vesting) = env.storage().instance().get::<_, VestingSchedule>(&KEY_VESTING) {
+            let now = env.ledger().timestamp();
+            if now < vesting.cliff {
+                return Err(ContractError::VestingNotComplete);
+            }
+            let vested = if now >= vesting.cliff + vesting.duration {
+                payout
+            } else {
+                let elapsed = now - vesting.cliff;
+                payout * elapsed as i128 / vesting.duration as i128
+            };
+            token_client.transfer(&env.current_contract_address(), &creator, &vested);
         } else {
-            total
-        };
+            token_client.transfer(&env.current_contract_address(), &creator, &payout);
+        }
 
-        token_client.transfer(&env.current_contract_address(), &creator, &payout);
-
-        // Extend instance storage TTL after successful withdrawal.
-        // This ensures contract metadata remains accessible for historical reference
-        // and potential future interactions (e.g., viewing campaign results).
-        // Uses same TTL strategy as contribute: threshold 17280, extension 518400 ledgers.
         env.storage().instance().extend_ttl(17280, 518400);
-
         env.storage().instance().set(&KEY_TOTAL, &0i128);
         env.storage().instance().set(&KEY_STATUS, &Status::Successful);
         env.storage().instance().extend_ttl(17280, 518400);
@@ -571,6 +602,120 @@ impl CrowdfundContract {
         Ok(())
     }
 
+    /// Allows early refund with a penalty fee.
+    ///
+    /// Contributors can claim a refund before the deadline with a penalty deducted.
+    /// The penalty is sent to the platform address or creator.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `contributor` - The contributor's Stellar address
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(ContractError::NotActive)` if campaign is not active
+    /// * `Err(ContractError::GoalReached)` if goal already reached
+    ///
+    /// # Side Effects
+    /// - Transfers refund minus penalty to contributor
+    /// - Transfers penalty to platform or creator
+    /// - Sets contributor's contribution to 0
+    pub fn refund_with_penalty(env: Env, contributor: Address) -> Result<(), ContractError> {
+        let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
+        if status != Status::Active {
+            return Err(ContractError::NotActive);
+        }
+
+        let total: i128 = env.storage().instance().get(&KEY_TOTAL).unwrap();
+        let goal: i128 = env.storage().instance().get(&KEY_GOAL).unwrap();
+        if total >= goal {
+            return Err(ContractError::GoalReached);
+        }
+
+        let key = DataKey::Contribution(contributor.clone());
+        let amount: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+        if amount <= 0 {
+            return Ok(());
+        }
+
+        let penalty_bps: u32 = env.storage().instance().get(&DataKey::PenaltyBps).unwrap_or(0);
+        let penalty = amount * penalty_bps as i128 / 10_000;
+        let refund = amount - penalty;
+
+        let token_address: Address = env.storage().instance().get(&KEY_TOKEN).unwrap();
+        let token_client = token::Client::new(&env, &token_address);
+
+        token_client.transfer(&env.current_contract_address(), &contributor, &refund);
+
+        if penalty > 0 {
+            let fee_recipient = if let Some(config) = env.storage().instance().get::<_, PlatformConfig>(&KEY_PLATFORM) {
+                config.address
+            } else {
+                env.storage().instance().get(&KEY_CREATOR).unwrap()
+            };
+            token_client.transfer(&env.current_contract_address(), &fee_recipient, &penalty);
+        }
+
+        env.storage().persistent().set(&key, &0i128);
+        let new_total = total - amount;
+        env.storage().instance().set(&KEY_TOTAL, &new_total);
+
+        env.events().publish(("campaign", "refund_with_penalty"), (contributor, refund, penalty));
+        Ok(())
+    }
+
+    /// Adjusts the campaign goal under certain conditions.
+    ///
+    /// Can only decrease the goal and only before any contributions are made.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    /// * `new_goal` - The new goal amount
+    ///
+    /// # Returns
+    /// * `Ok(())` on success
+    /// * `Err(ContractError::NotActive)` if campaign is not active
+    /// * `Err(ContractError::CannotAdjustGoal)` if goal increase or contributions exist
+    ///
+    /// # Side Effects
+    /// - Updates goal in storage
+    /// - Records adjustment in history
+    /// - Publishes "goal_adjusted" event
+    pub fn adjust_goal(env: Env, new_goal: i128) -> Result<(), ContractError> {
+        let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
+        if status != Status::Active {
+            return Err(ContractError::NotActive);
+        }
+
+        let creator: Address = env.storage().instance().get(&KEY_CREATOR).unwrap();
+        creator.require_auth();
+
+        let current_goal: i128 = env.storage().instance().get(&KEY_GOAL).unwrap();
+        let total: i128 = env.storage().instance().get(&KEY_TOTAL).unwrap();
+
+        if new_goal > current_goal || total > 0 {
+            return Err(ContractError::CannotAdjustGoal);
+        }
+
+        env.storage().instance().set(&KEY_GOAL, &new_goal);
+
+        let mut history: Vec<GoalAdjustment> = env
+            .storage()
+            .persistent()
+            .get(&KEY_GOAL_HISTORY)
+            .unwrap_or_else(|| Vec::new(&env));
+        history.push_back(GoalAdjustment {
+            previous_goal: current_goal,
+            new_goal,
+            timestamp: env.ledger().timestamp(),
+        });
+        env.storage().persistent().set(&KEY_GOAL_HISTORY, &history);
+        env.storage().persistent().extend_ttl(&KEY_GOAL_HISTORY, 100, 100);
+
+        env.events().publish(("campaign", "goal_adjusted"), (current_goal, new_goal));
+        Ok(())
+    }
+
     // ── View functions ────────────────────────────────────────────────────────
 
     /// Returns the total amount raised so far in stroops.
@@ -815,10 +960,10 @@ impl CrowdfundContract {
             .get(&KEY_DESC)
             .unwrap_or_else(|| String::from_str(&env, ""));
         let status: Status = env.storage().instance().get(&KEY_STATUS).unwrap();
-        
-        let platform_config: Option<PlatformConfig> = env.storage()
+        let category: Category = env.storage()
             .instance()
-            .get(&KEY_PLATFORM);
+            .get(&KEY_CATEGORY)
+            .unwrap_or(Category::Other);
 
         let (has_platform_config, platform_fee_bps, platform_address) =
             if let Some(config) = env.storage().instance().get::<_, PlatformConfig>(&KEY_PLATFORM) {
@@ -839,7 +984,61 @@ impl CrowdfundContract {
             has_platform_config,
             platform_fee_bps,
             platform_address,
+            category,
         }
+    }
+
+    /// Returns the campaign category.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// Campaign category
+    pub fn get_category(env: Env) -> Category {
+        env.storage()
+            .instance()
+            .get(&KEY_CATEGORY)
+            .unwrap_or(Category::Other)
+    }
+
+    /// Returns the vesting schedule (if configured).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// Optional VestingSchedule with cliff and duration
+    pub fn get_vesting_info(env: Env) -> Option<VestingSchedule> {
+        env.storage().instance().get(&KEY_VESTING)
+    }
+
+    /// Returns the goal adjustment history.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// Vector of GoalAdjustment entries
+    pub fn get_goal_history(env: Env) -> Vec<GoalAdjustment> {
+        env.storage()
+            .persistent()
+            .get(&KEY_GOAL_HISTORY)
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Returns the penalty fee in basis points (if configured).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment
+    ///
+    /// # Returns
+    /// Penalty fee in basis points, or 0 if not configured
+    pub fn get_penalty_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::PenaltyBps)
+            .unwrap_or(0)
     }
 
     /// Returns a paginated list of contributor addresses.
