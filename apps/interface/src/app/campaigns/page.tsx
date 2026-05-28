@@ -13,14 +13,14 @@ import {
 import { LoadingSkeletonGrid } from "@/components/ui/LoadingSkeleton";
 import { Campaign } from "@/types/campaign";
 import { ALL_CAMPAIGNS } from "@/lib/campaigns";
-import { Search, GitCompare } from "lucide-react";
+import { Search, GitCompare, SlidersHorizontal, X } from "lucide-react";
 import { useComparison } from "@/context/ComparisonContext";
 import { Pagination } from "@/components/ui/Pagination";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 type FilterTab = "all" | "active" | "funded" | "ended";
-type SortOption = "newest" | "most-funded" | "ending-soon";
+type SortOption = "recent" | "popular" | "deadline" | "progress";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -62,8 +62,9 @@ function CampaignsInner() {
   const { selected, clear } = useComparison();
 
   const filter = (searchParams.get("filter") as FilterTab) ?? "all";
-  const sort = (searchParams.get("sort") as SortOption) ?? "newest";
+  const sort = (searchParams.get("sort") as SortOption) ?? "recent";
   const query = searchParams.get("q") ?? "";
+  const category = searchParams.get("category") ?? "";
   const page = Math.max(1, Number(searchParams.get("page") ?? "1"));
 
   const pageSize = Math.max(
@@ -72,7 +73,16 @@ function CampaignsInner() {
   );
 
   const [pledge, setPledge] = useState<string | null>(null);
+  const [shareTarget, setShareTarget] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
   const [inputValue, setInputValue] = useState(query);
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [goalMin, setGoalMin] = useState(searchParams.get("goalMin") ?? "");
+  const [goalMax, setGoalMax] = useState(searchParams.get("goalMax") ?? "");
+  const [dateFrom, setDateFrom] = useState(searchParams.get("dateFrom") ?? "");
+  const [dateTo, setDateTo] = useState(searchParams.get("dateTo") ?? "");
 
   const setParam = (key: string, value: string) => {
     const params = new URLSearchParams(searchParams.toString());
@@ -113,15 +123,42 @@ function CampaignsInner() {
     router.replace(`/campaigns?${params.toString()}`, { scroll: false });
   };
 
+  const activeGoalMin = searchParams.get("goalMin")
+    ? Number(searchParams.get("goalMin"))
+    : null;
+  const activeGoalMax = searchParams.get("goalMax")
+    ? Number(searchParams.get("goalMax"))
+    : null;
+  const activeDateFrom = searchParams.get("dateFrom") ?? null;
+  const activeDateTo = searchParams.get("dateTo") ?? null;
+  const hasAdvanced = !!(
+    activeGoalMin ||
+    activeGoalMax ||
+    activeDateFrom ||
+    activeDateTo
+  );
+
   const filtered = applySort(
     applyFilter(
-      ALL_CAMPAIGNS.filter(
-        (c) =>
-          !query ||
-          c.title.toLowerCase().includes(query.toLowerCase()) ||
-          c.description.toLowerCase().includes(query.toLowerCase()) ||
-          c.creator.toLowerCase().includes(query.toLowerCase()),
-      ),
+      ALL_CAMPAIGNS.filter((c) => {
+        if (query) {
+          const q = query.toLowerCase();
+          if (
+            !c.title.toLowerCase().includes(q) &&
+            !c.description.toLowerCase().includes(q) &&
+            !c.creator.toLowerCase().includes(q)
+          )
+            return false;
+        }
+        if (category && c.category !== category) return false;
+        if (activeGoalMin !== null && c.goal < activeGoalMin) return false;
+        if (activeGoalMax !== null && c.goal > activeGoalMax) return false;
+        if (activeDateFrom && new Date(c.deadline) < new Date(activeDateFrom))
+          return false;
+        if (activeDateTo && new Date(c.deadline) > new Date(activeDateTo))
+          return false;
+        return true;
+      }),
       filter,
     ),
     sort,
@@ -136,8 +173,8 @@ function CampaignsInner() {
 
   return (
     <>
-      {/* Controls */}
-      <div className="flex flex-col sm:flex-row gap-3 mb-6">
+      {/* Controls row */}
+      <div className="flex flex-col sm:flex-row gap-3 mb-4">
         <div className="relative flex-1">
           <Search
             size={16}
@@ -152,16 +189,123 @@ function CampaignsInner() {
             className="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl pl-9 pr-4 py-2 text-sm text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none focus:border-indigo-500"
           />
         </div>
+
+        {/* Category filter */}
+        <select
+          value={category}
+          onChange={(e) => setParam("category", e.target.value)}
+          aria-label="Filter by category"
+          className={selectCls}
+        >
+          <option value="">All Categories</option>
+          {CATEGORIES.map((cat) => (
+            <option key={cat} value={cat}>
+              {cat.charAt(0).toUpperCase() + cat.slice(1)}
+            </option>
+          ))}
+        </select>
+
+        {/* Sort */}
         <select
           value={sort}
           onChange={(e) => setParam("sort", e.target.value)}
-          className="bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded-xl px-3 py-2 text-sm text-gray-900 dark:text-white focus:outline-none focus:border-indigo-500"
+          aria-label="Sort campaigns"
+          className={selectCls}
         >
-          <option value="newest">Newest</option>
-          <option value="most-funded">Most Funded</option>
-          <option value="ending-soon">Ending Soon</option>
+          {SORT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
         </select>
+
+        {/* Advanced filters toggle */}
+        <button
+          onClick={() => setShowAdvanced((v) => !v)}
+          aria-expanded={showAdvanced}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium transition border ${
+            hasAdvanced
+              ? "bg-indigo-600 border-indigo-500 text-white"
+              : "bg-white dark:bg-gray-800 border-gray-300 dark:border-gray-700 text-gray-700 dark:text-gray-300 hover:border-indigo-500"
+          }`}
+        >
+          <SlidersHorizontal size={14} />
+          Filters{hasAdvanced ? " ●" : ""}
+        </button>
       </div>
+
+      {/* Advanced filter panel */}
+      {showAdvanced && (
+        <div className="mb-4 rounded-2xl border border-gray-700 bg-gray-900 p-5 space-y-4">
+          <h3 className="text-sm font-semibold text-gray-300">
+            Advanced Filters
+          </h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <div>
+              <label className="mb-1 block text-xs text-gray-400">
+                Min Goal (XLM)
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={goalMin}
+                onChange={(e) => setGoalMin(e.target.value)}
+                placeholder="e.g. 1000"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-400">
+                Max Goal (XLM)
+              </label>
+              <input
+                type="number"
+                min={0}
+                value={goalMax}
+                onChange={(e) => setGoalMax(e.target.value)}
+                placeholder="e.g. 50000"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-400">
+                Deadline From
+              </label>
+              <input
+                type="date"
+                value={dateFrom}
+                onChange={(e) => setDateFrom(e.target.value)}
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs text-gray-400">
+                Deadline To
+              </label>
+              <input
+                type="date"
+                value={dateTo}
+                onChange={(e) => setDateTo(e.target.value)}
+                className={inputCls}
+              />
+            </div>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <button
+              onClick={clearAdvanced}
+              className="flex items-center gap-1 px-3 py-1.5 text-xs text-gray-400 hover:text-white transition"
+            >
+              <X size={12} /> Clear
+            </button>
+            <button
+              onClick={applyAdvanced}
+              className="px-4 py-1.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-sm font-medium text-white transition"
+            >
+              Apply
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Filter tabs */}
       <div
@@ -228,6 +372,7 @@ function CampaignsInner() {
                 key={campaign.id}
                 campaign={campaign}
                 onPledge={(id) => setPledge(id)}
+                onShare={(id, title) => setShareTarget({ id, title })}
                 index={i}
                 query={query}
               />
@@ -252,6 +397,14 @@ function CampaignsInner() {
             ALL_CAMPAIGNS.find((c) => c.id === pledge)?.title ?? pledge
           }
           onClose={() => setPledge(null)}
+        />
+      )}
+
+      {shareTarget && (
+        <ShareModal
+          campaignId={shareTarget.id}
+          campaignTitle={shareTarget.title}
+          onClose={() => setShareTarget(null)}
         />
       )}
 
