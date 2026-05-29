@@ -27,7 +27,7 @@ export interface PerformanceCallback {
 export function measureCoreWebVitals(
   callback: PerformanceCallback
 ): void {
-  if (typeof window === "undefined") return;
+  if (typeof window === "undefined" || !performance?.getEntriesByType) return;
 
   const metrics: PerformanceMetrics = {};
 
@@ -95,7 +95,7 @@ export function measureCoreWebVitals(
  * Get current Core Web Vitals
  */
 export function getCoreWebVitals(): CoreWebVitals {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || !performance?.getEntriesByType) {
     return { lcp: null, fid: null, cls: null };
   }
 
@@ -124,7 +124,7 @@ export function getCoreWebVitals(): CoreWebVitals {
  * Measure page load time
  */
 export function measurePageLoadTime(): number {
-  if (typeof window === "undefined") return 0;
+  if (typeof window === "undefined" || !performance?.getEntriesByType) return 0;
 
   const navigationTiming = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming;
   if (!navigationTiming) return 0;
@@ -136,7 +136,7 @@ export function measurePageLoadTime(): number {
  * Measure resource timing
  */
 export function getResourceTimings(): PerformanceResourceTiming[] {
-  if (typeof window === "undefined") return [];
+  if (typeof window === "undefined" || !performance?.getEntriesByType) return [];
   return performance.getEntriesByType("resource") as PerformanceResourceTiming[];
 }
 
@@ -164,6 +164,7 @@ export function reportPerformanceMetrics(
  */
 export function markPerformance(name: string): void {
   if (typeof window === "undefined") return;
+  if (typeof performance?.mark !== "function") return;
   performance.mark(name);
 }
 
@@ -176,6 +177,7 @@ export function measurePerformance(
   endMark: string
 ): number {
   if (typeof window === "undefined") return 0;
+  if (typeof performance?.measure !== "function") return 0;
 
   try {
     performance.measure(name, startMark, endMark);
