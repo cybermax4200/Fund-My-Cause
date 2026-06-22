@@ -118,3 +118,9 @@ pub const KEY_GOVERNANCE_CONFIG: Symbol = soroban_sdk::symbol_short!("GOVCFG");
 pub const KEY_GOVERNANCE_NONCE: Symbol = soroban_sdk::symbol_short!("GOVNONCE");
 /// Storage key for emergency pause flag
 pub const KEY_EMERGENCY_PAUSE: Symbol = soroban_sdk::symbol_short!("EMPAUSE");
+
+// ── DeFi: Yield Generation ────────────────────────────────────────────────────
+/// Storage key for yield configuration (reward token, rate, pool balance)
+pub const KEY_YIELD_CONFIG: Symbol = soroban_sdk::symbol_short!("YLDCFG");
+/// Storage key for total yield distributed so far
+pub const KEY_YIELD_TOTAL: Symbol = soroban_sdk::symbol_short!("YLDTOT");
